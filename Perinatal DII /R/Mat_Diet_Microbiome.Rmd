@@ -1,0 +1,1738 @@
+---
+title: "Maternal Diet Microbiome Analysis"
+output: html_notebook
+---
+
+# Workflow {.tabset}
+1. __Notebook Set up__  
+    + Paramaters
+    + Packages
+    + Common Functions
+    
+2. __DII and Microbiome__   
+    + Normalization and Taxa Abundance   
+    + Diversity Analysis: Alpha and Beta  
+    + Network Analysis - NetComi
+    + Differential Abundance - metagenomeSeq  
+
+3. __Combining the Microbiome and predicted metabolome__  
+    + PICRUSt2 Analysis 
+      + Files creation, code to run in terminal and identifying pathways
+      + Enriched pathway analysis
+    + Gene set enrichment analysis
+
+
+## 1. Notebook Set up
+*** 
+
+### 1.1 Notebook Parameters
+```{r}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.height = 3,
+                      fig.width = 6,
+                      fig.path = 'figures',
+                      fig.align = "center",
+                      fig.cap = TRUE)
+```
+
+
+
+### 1.2 Required Packages
+Use devtools to install packages if problematic
+```{r}
+library(captioner)
+library(here)
+library(tidyverse)
+library(devtools)
+library(sva)
+library(phyloseq)
+library(metagenomeSeq)
+library(metagMisc)
+library(omu)
+library(genefilter)
+library(PMA)
+library(ade4)
+library(ggrepel)
+library(phyloseqGraphTest)
+library(igraph)
+library(ggnetwork)
+library(heatmaply)
+library(pathview)
+library(WGCNA)
+library(MetaboDiff)
+library(factoextra)
+library(biomformat)
+library(ggtree)
+library(data.table)
+library(SpiecEasi) #intsall gofotran using https://github.com/coatless-mac/macrtools
+library(networkD3)
+library(Matrix)
+library(pathview)
+library(NetCoMi)
+library(readxl)
+library(circlize)
+library(Hmisc)
+library(corrplot)
+library(ggfortify)
+library(clusterProfiler)
+library(enrichplot)
+library(MicrobiomeProfiler)
+library(finalfit)
+library(vegan)
+library(ggpubr)
+```
+
+
+### 1.3 Commonly used functions
+```{r}
+#Write function for linear models
+ ################################################
+ggplotRegression <- function (fit) {
+  require(ggplot2)
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    stat_smooth(method = "lm", col = "red") +
+    labs(title = paste("Adj R2 = ",signif(summary(fit)$adj.r.squared, 5),
+                     "Intercept =",signif(fit$coef[[1]],5 ),
+                     " Slope =",signif(fit$coef[[2]], 5),
+                     " P =",signif(summary(fit)$coef[2,4], 5)))
+}
+```
+
+
+
+*** 
+
+
+## 2. ASV Microbiome Analysis {.tabset}
+*** 
+
+__Read in Merged Phyloseq Object__
+```{r}
+# Step 1: Read in the saved phyloseq object #######################################################
+ps.f <- readRDS(here("Output", "Microbiome_Output", "Phyloseq_Objects", "ps.rds"))
+
+#Add FFQ type missing for sample ID 200
+ps.f@sam_data[[7,"FFQ"]] <- "DHQII"
+
+# Step 2:Generate useful dataframes
+#######################################################
+
+# Sample info
+info <- sample_data(ps.f)
+info <- data.frame(info)
+
+#Change Fecal to Stool for covariate correction
+info$group <- NULL
+info <- info %>% mutate(SampleType = case_when(SampleType == "Fecal" ~ "Stool",
+                                               SampleType == "Rectal" ~ "Rectal",
+                                               SampleType == "Stool" ~ "Stool"),
+                        group = case_when(tertiles == "Tertile 1" ~ "Tertile 1",
+                                          tertiles == "Tertile 2" ~ "Tertile 2/3",
+                                          tertiles == "Tertile 3" ~ "Tertile 2/3"))
+
+
+#reassign to your phyloseq object
+sample_data(ps.f) <- info
+
+# Taxa info
+taxa <- as.data.frame(tax_table(ps.f))
+
+```
+
+
+__Demographic info of the study cohort__
+```{r}
+# Create Dataframe for plotting
+#######################################################
+Demo_data <- data.frame(info[,27:40])
+
+# Update insurance type error
+#######################################################
+Demo_data <- Demo_data %>% 
+   mutate(Health.Insurance = case_when(Health.Insurance == "Federal Aide_Private" ~ "Federal Aide",
+                            Health.Insurance == "Private_Federal Aide" ~ "Federal Aide",
+                            Health.Insurance == "Federal Aide" ~ "Federal Aide",
+                            Health.Insurance == "Private" ~ "Private")) %>% 
+   mutate(Relationship.Status = case_when(Relationship.Status == "Seperated/Widowed" ~ "Single",
+                            Relationship.Status == "Single" ~ "Single",
+                            Relationship.Status == "Married/Relationship" ~ "Married/Relationship"))
+
+# Make a combined Race & Ethnicity Factor with three levels
+#######################################################
+Demo_data$Race_Ethnicity <- 0
+
+Demo_data <- Demo_data %>% 
+   mutate(Race_Ethnicity = case_when(Race == "Black" & Ethnicity == "Non-Hispanic/Latino" ~ "Non-Hispanic Black",
+                            Race == "White" & Ethnicity == "Hispanic/Latino" ~ "Hispanic")) %>%
+  rename("Health_Insurance" = "Health.Insurance") %>%
+  rename("Gestational_Weeks" = "Gestational_age") %>%
+  rename("Race_Ethnicity" = "Race_Ethnicity") %>%
+  rename("Relationship_Status" = "Relationship.Status") %>%
+  rename("Planned_Pregnancy" = "Planned.Pregnancy")
+
+Demo_data$Race_Ethnicity <- Demo_data$Race_Ethnicity %>% replace_na("Other/Unreported")
+
+# Get updated dataframe to use for the table plotting
+#######################################################
+Demo_data <- Demo_data[,-c(2,4,5)]
+
+# Final Crosstable 
+#######################################################
+explanatory = c("DII","Gestational_Weeks","Age", "BMI","Race_Ethnicity", 
+                "Health_Insurance","Education","Employment","Income",
+                "Relationship_Status","Planned_Pregnancy")
+dependent = "tertiles"
+Demo_data %>%
+  summary_factorlist(dependent, explanatory, 
+  p=TRUE, add_dependent_label=TRUE) -> t1
+
+t1$p <- as.character(round(as.numeric(t1$p),digit=2))
+t1$p <- replace(t1$p, is.na(t1$p), "")
+
+knitr::kable(t1, align=c("l", "l", "r", "r", "r"))
+```
+
+
+Give a range of EGA for sampling and same for the diet given there is variability it when it was assessed.
+```{r}
+#Pull the FFQ sampling dates
+################################################################################
+FFQ_dates <- read.csv(here("Data", "Blood Data", "Date_FFQ_ID_HGB.csv"))
+FFQ_dates <- FFQ_dates[,c(1,4)]
+
+#Pull the micorbiome sampling dates
+################################################################################
+sample_dates <- read.csv(here("Data", "Microbiome_Data", "Prepartum_Diet_data.csv"))
+sample_dates <- sample_dates[,c(2,4,5)]
+sample_dates <- sample_dates %>% filter(redcapid %in% info$redcapid & Gestational_age %in% info$Gestational_age)
+
+#Merge by ID
+################################################################################
+EGA_range <- merge(FFQ_dates, sample_dates, by = "redcapid", all = TRUE)
+
+
+
+#Find difference in dates to find FFQ EGA
+################################################################################
+EGA_range$Visit_Date <- as.Date(EGA_range$Visit_Date, format = "%m/%d/%y")
+EGA_range$FFQ_Date <- as.Date(EGA_range$FFQ_Date, format = "%m/%d/%y")
+
+# Calculate the difference in weeks
+EGA_range$weeks_difference <- as.numeric(difftime(EGA_range$FFQ_Date, EGA_range$Visit_Date, units = "weeks"))
+
+#This is the FFQ EGA
+EGA_range$EGA_FFQ <- round(EGA_range$Gestational_age + EGA_range$weeks_difference)
+
+#Print mean and sd for sampling EGA
+column_mean <- mean(as.numeric(EGA_range$Gestational_age), na.rm = TRUE)
+column_sd <- sd(as.numeric(EGA_range$Gestational_age), na.rm = TRUE)
+cat("Sampling Mean:", column_mean, "\n")
+cat("Sampling Standard Deviation:", column_sd, "\n")
+
+
+
+#Print mean and sd for FFQ EGA
+column_mean <- mean(as.numeric(EGA_range$EGA_FFQ), na.rm = TRUE)
+column_sd <- sd(as.numeric(EGA_range$EGA_FFQ), na.rm = TRUE)
+cat("FFQ Mean:", column_mean, "\n")
+cat("FFQ Standard Deviation:", column_sd, "\n")
+```
+
+
+
+
+
+
+
+### 2.1 Normalization and Taxa Abundance
+Before examining the microbiome profiles, the reads need to be normalized to account for the various library sizes. For these data, we transformed the ASV counts via cumulative-sum-scaling (CSS)
+
+```{r}
+#Step 1: CSS transform the data
+####################################################################
+css <- phyloseq_transform_css(ps.f, norm= TRUE, log = TRUE)
+
+#Step 2: Taxa agglomerate
+####################################################################
+ps_phylum <- tax_glom(css, "Phylum")
+
+#Step 3: Plot abundances
+####################################################################
+taxa_names(ps_phylum) <- phyloseq::tax_table(ps_phylum)[, "Phylum"]
+
+psmelt(ps_phylum) %>%
+  ggplot(data = ., aes(x = DII, y = Abundance)) +
+    geom_point(aes(color = OTU)) +
+  geom_smooth(method='lm') +
+    labs(x = "DII", y = "CSS Normalized Abundance", angle = 45) +
+    facet_wrap(~ OTU, scales = "free") +
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=0.5), 
+          panel.background = element_blank(),
+          axis.line = element_line(colour = "black"))
+```
+
+
+
+
+
+### 2.2 Diversity Analysis {.tabset}
+
+#### 2.2.1 - Alpha Diversity
+```{r}
+#Step 1: Get alpha diversity measures 
+###############################################
+alpha.div <- estimate_richness(css, split = TRUE, measures = "Shannon")
+
+alpha.div$sd <- sd(alpha.div$Shannon)
+alpha.div$mean <- mean(alpha.div$Shannon)
+
+# Step 2: Plot richness 
+#######################################################
+
+#Diversity by DII
+plot_richness(css, x="DII", measures=c("Shannon", "Simpson"), color="DII") + 
+  scale_colour_gradient(low = "red", high = "blue") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        axis.title = element_text(size = 15))
+
+
+#Step 3: Statistical testing 
+#######################################################
+#Diversity by DII
+alpha.div <- merge(alpha.div,info, by=0, all=TRUE)
+
+
+#Wilcox Rank sum and Boxplot by DII Tertile
+
+ggplot(alpha.div, aes(x = tertiles, y = Shannon, fill=tertiles)) +
+   geom_boxplot() +
+  scale_fill_manual(values=c("red", "purple","blue")) +
+  ggtitle("Alpha diversity by tertile") +
+  xlab("DII Tertile") +
+  ylab("Shannon Index") +
+  stat_compare_means(method = "wilcox.test") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"),
+        axis.title = element_text(size = 15))
+
+#Linear model of alpha diversity by DII
+Alpha_diversity_lm <- lm(Shannon ~ DII + Age + Gestational_age + BMI + FFQ + SampleType, data = alpha.div)
+
+ggplot(Alpha_diversity_lm$model, aes_string(x = names(Alpha_diversity_lm$model)[2], 
+                                            y = names(Alpha_diversity_lm$model)[1]),
+       color = "DII") + 
+    geom_point() +
+    stat_smooth(method = "lm", col = "red") +
+    labs(title = paste("Adj R2 = ",signif(summary(Alpha_diversity_lm)$adj.r.squared, 5),
+                     "Intercept =",signif(Alpha_diversity_lm$coef[[1]],5 ),
+                     " Slope =",signif(Alpha_diversity_lm$coef[[2]], 5),
+                     " P =",signif(summary(Alpha_diversity_lm)$coef[2,4], 5))) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+```
+
+
+
+#### 2.2.2 - Beta Diversity
+
+```{r}
+# Method 1: Calculate the Distance Using Bray curtis
+###########################################################################
+ord <- ordinate(css, "PCoA", "bray", weighted=TRUE)
+
+plot_ordination(css, ord, color="group") + 
+  #scale_colour_gradient(low = "red", high = "blue") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = 
+          element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        axis.title = element_text(size = 20)) +
+  coord_fixed() +
+  stat_ellipse(aes(group = group, color = group)) +
+  scale_color_manual(name = "group",
+                     values = c("Tertile 1" = "red",
+                                "Tertile 2/3" = "blue",
+                                labels = c("Tertile 1", "Tertile 2/3")))
+  
+
+#Plot average distances by DII score
+########################################
+bray_dist <- as.data.frame(as.matrix(phyloseq::distance(css, "bray")))
+bray_dist$Average_dist <- with(bray_dist, rowSums(bray_dist))
+bray_dist$Average_dist <- bray_dist$Average_dist/48 # divide by 48 to not include self measure
+
+av_bray_dist <- bray_dist[,49:50]
+bray_plotting <- merge(info, av_bray_dist, by = 0, all=TRUE)
+bray_plotting <- bray_plotting[,-44]
+
+ggplot(bray_plotting, aes(x=DII, y= Average_dist)) +
+  geom_point()  +
+    stat_smooth(method = "lm", col = "red") +
+  xlab("DII") +
+  ylab("Average Bray-Curtis Distance") +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+#Check sig difference between the two groups
+########################################
+bray_dist <- bray_dist[,-50]
+
+adonis2(bray_dist ~ group + Age + Gestational_age + BMI + SampleType + FFQ, data = bray_plotting)
+
+#equality of variance between participants in the tertile 1 versus tertile 2/3
+sd_bray_f_data <- bray_dist %>%
+  rownames_to_column() %>%
+  gather(colname, value, -rowname) %>%
+  rename("SampleID" = "rowname") %>% 
+  rename("target" = "colname")
+
+bray_plotting <- bray_plotting[,c(3,43)]
+
+sd_bray_f_data <- merge(sd_bray_f_data, bray_plotting, by = "SampleID")
+
+# F test for equality of variances
+var.test(value ~ group, sd_bray_f_data, 
+         alternative = "two.sided")
+
+
+# Method 2: Unifrac distance
+###########################################################################
+uni <- UniFrac(css, weighted=FALSE, normalized=TRUE, parallel=FALSE, fast=TRUE)
+
+uni.pcoa <- ordinate(css, method="PCoA", distance=uni)
+
+plot_ordination(css, uni.pcoa, color="group") + 
+  #scale_colour_gradient(low = "red", high = "blue") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = 
+          element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        axis.title = element_text(size = 20)) +
+  coord_fixed() +
+  stat_ellipse(aes(group = group, color = group)) +
+  scale_color_manual(name = "group",
+                     values = c("Tertile 1" = "red",
+                                "Tertile 2/3" = "blue",
+                                labels = c("Tertile 1", "Tertile 2/3")))
+```
+
+
+
+
+
+### 2.4 metagenomeSeq - CSS and Differential Abundance
+*** 
+
+Normalize the counts to correct for any difference in read coverage across samples. Using metagenomseq in a three step process. See all the details in this tutorial
+Method
+“cumNorm is a normalization method that calculates scaling factors equal to the sum of counts up to a particular quantile.” Basically the normalization uses a scaling factor to put them into quantiles so they are more comparable cite - colorbrewer Subsetted the tertiles so its two factors
+
+#### 2.4.1 Normalization
+__All tertiles__. 
+Visualization with heatmaps only
+
+```{r}
+#Step 1: Create MRexperiment Object ##########################################
+meta.T1.T2.T3 <- phyloseq_to_metagenomeSeq(css)
+
+
+#Step 2: Visualize by abundance ##########################################
+data2 <- pData(meta.T1.T2.T3)$tertiles
+
+#Make the map colors
+heatmapCols2 <- colorRampPalette(brewer.pal(9, "Blues"))(50)
+
+#make the tertile colors
+color_vectors <- as.data.frame(meta.T1.T2.T3@phenoData@data[["tertiles"]])
+color_vectors$color <- 0
+names(color_vectors) <- c("Tertile", "color")
+
+color_vectors <- color_vectors %>% 
+   mutate(color = case_when(Tertile == "Tertile 1" ~ "red",
+                            Tertile == "Tertile 2" ~ "purple",
+                            Tertile == "Tertile 3" ~ "blue"))
+
+heatmapColColors2 <- color_vectors$color
+
+plotMRheatmap(obj = meta.T1.T2.T3, n=100, cexRow = 0.4, cexCol = 0.4, 
+                         trace = "none", col= heatmapCols2, labRow = FALSE, 
+                         labCol = FALSE, key = TRUE,  
+                         ColSideColors = heatmapColColors2)
+legend("topleft", legend=c("Tertile1","Tertile2", "Tertile3"), 
+       fill=c("red", "purple","blue"), cex=0.8, box.lty=0)
+
+#2c - visualize normalized abundance by DII Continuous score
+data3 <- pData(meta.T1.T2.T3)$DII
+heatmapColColors3 <- brewer.pal(8,"RdBu")[as.integer(factor(data3))];
+
+heatmapCols3 <- colorRampPalette(brewer.pal(9, "Blues"))(50)
+
+plotMRheatmap(obj = meta.T1.T2.T3, n=100, cexRow = 0.4, cexCol = 0.4, 
+                         trace = "none", col= heatmapCols3, labRow = FALSE, 
+                         labCol = FALSE, key = TRUE,  
+                         ColSideColors = heatmapColColors3)
+legend("topright", legend=c("DII score"), 
+       fill=c(brewer.pal(8,"RdBu")), cex=0.8, box.lty=0)
+```
+
+__Make Metagenomseq of Phylum Agglomerated PS__  
+```{r}
+meta.phylum <- phyloseq_to_metagenomeSeq(ps_phylum)
+
+```
+
+
+
+
+__Data Prep for later__  
+Note: Data not corrected by any covariates
+```{r}
+# Step 1: Prep the Data ###############################################
+corr.counts <- otu_table(css)
+
+corr.c.OTU <- data.frame(corr.counts) #Use later
+```
+
+
+#### 2.4.2 0-inflated Gaussian Model
+__Fit the Model__
+Corrected models by BMI, Age, EGA at during the first trimester visit when data was collected, and need to add Fetal Sex. Currently a lot of NA's in the Fetal_sex column so we cant use it in the model correction until the rest of them are added back in
+
+
+```{r}
+# DII , corrected by BMI, Age, EGA, and Sample type and FFQ##########################
+
+#Data Prep - trim low features
+rareFeatures = which(rowSums(MRcounts(meta.T1.T2.T3) > 0) < 10)
+trim2 = meta.T1.T2.T3[-rareFeatures, ]
+
+#Prep for the Model- Multiple univariate models #####################################
+tertile = pData(trim2)$tertile
+DII = as.numeric(pData(trim2)$DII)
+BMI = as.numeric(pData(trim2)$BMI)  
+Age = as.numeric(pData(trim2)$Age)
+EGA = as.numeric(pData(trim2)$Gestational_age)
+FFQ = as.factor(pData(trim2)$FFQ)
+SampleType <- as.factor(pData(trim2)$SampleType)
+normFactor = normFactors(trim2) 
+normFactor = log2(normFactor/median(normFactor) + 1)
+
+settings = zigControl(maxit = 10, verbose = TRUE)
+modDII = model.matrix(~DII + BMI + Age + EGA + FFQ + SampleType + normFactor)
+fitDII = fitZig(obj = trim2, mod = modDII, useCSSoffset = FALSE, control = settings)
+
+#code for filtering to all signficant taxa vs top top
+MRcoefsDII <- MRcoefs(fitDII, coef = 2) #default -> gives top 10 taxa
+
+# assign taxanames
+MRcoefs_tax <- data.frame(meta.T1.T2.T3@featureData@data)
+MRcoefs_tax <- MRcoefs_tax[,-1]
+MRcoefs_taxDII <- MRcoefs_tax[row.names(MRcoefs_tax) %in% row.names(MRcoefsDII), ] 
+MRcoefs_finalDII <- merge(MRcoefsDII, MRcoefs_taxDII, by = 0, all = TRUE) 
+
+#Repeat for all the identified taxa to put into the supplemental information
+MRcoefsDII_all <- MRcoefs(fitDII, coef = 2, number = 30)
+MRcoefsDII_all <- MRcoefsDII_all %>% subset(adjPvalues < 0.050)
+MRcoefsDII_all_taxa <- MRcoefs_tax[row.names(MRcoefs_tax) %in% row.names(MRcoefsDII_all), ] 
+MRcoefsDII_all <- merge(MRcoefsDII_all_taxa, MRcoefsDII_all, by = 0, all = TRUE) 
+MRcoefsDII_all <- MRcoefsDII_all[,-1]
+MRcoefsDII_all <- MRcoefsDII_all %>% dplyr::rename(foldchange = 'DII')
+
+MRcoefsDII_table <- MRcoefsDII_all[order(MRcoefsDII_all$foldchange,decreasing=TRUE),]
+MRcoefsDII_table$foldchange <- prettyNum(MRcoefsDII_table$foldchange, format = "g", digits = 2)
+MRcoefsDII_table$pvalues <- prettyNum(MRcoefsDII_table$pvalues , format = "g", digits = 2)
+MRcoefsDII_table$adjPvalues <- prettyNum(MRcoefsDII_table$adjPvalues , format = "g", digits = 2)
+knitr::kable(MRcoefsDII_table)
+
+write.csv(MRcoefsDII_table, here("Output", "Microbiome_Output", "DII_enriched_Microbes.csv"))
+
+#Plot the Exported Fits ####################################################
+
+#B) DII   ##########################
+MRcoefs_finalDII <- MRcoefs_finalDII %>% dplyr::rename(foldchange = 'DII')
+MRcoefs_finalDII$Genus <- make.unique(MRcoefs_finalDII$Genus, sep = '.')
+
+MRcoefs_finalDII$Genus <- factor(MRcoefs_finalDII$Genus, 
+                              MRcoefs_finalDII$Genus[order(MRcoefs_finalDII$adjPvalues)], 
+                              ordered=T)
+
+#Add in Plot names with lowest discernable taxa
+MRcoefs_finalDII$Plot_names <- c("italic('g_Prevotella')", 
+                                 "italic('Parabacteroides distasonis')", 
+                                 "italic('Gardnerella vaginalis')", 
+                                 "italic('Atopobium vaginae')",
+                                 "f_Eggerthellaceae",
+                                 "italic('g_Corynebacterium')",
+                                 "italic('g_Faecalibacterium')",
+                                 "italic('Gemella asaccharolytica')",
+                                 "italic('Solobacterium moorei')",
+                                 "italic('g_Clostridium sensu stricto')")
+
+#Add directionality based on fold change
+MRcoefs_finalDII$just <- ifelse(MRcoefs_finalDII$foldchange < 0,0,1)
+
+#Order by fold chang
+MRcoefs_finalDII$Plot_names = with(MRcoefs_finalDII, reorder(Plot_names, foldchange, median))
+
+
+#Make the plot
+ggplot(MRcoefs_finalDII, aes(x=Plot_names, y=foldchange, fill=foldchange)) +
+  geom_bar(stat="identity") +
+  scale_y_continuous("Fold change", limits = c(-1,1), position="left") +
+  scale_x_discrete("", labels = NULL) +
+  scale_fill_gradient2(low="darkred", high="darkblue", midpoint=0,
+                        limits=c(-1,1)) +
+  coord_flip() +
+  theme_minimal()+
+  geom_text(aes(x=Plot_names, y=0, label=Plot_names), hjust=MRcoefs_finalDII$just, parse = TRUE)
+```
+
+
+```{r}
+#Model C) Phylum Agglommerated - DII , corrected by BMI, Age, EGA, and Fetal Sex  
+#########################################################################################
+
+#Data Prep
+rareFeatures = which(rowSums(MRcounts(meta.phylum) > 0) < 10)
+trim2 = meta.phylum[-rareFeatures, ]
+
+#Prep for the Model- Multiple univariate models
+tertile = pData(trim2)$tertile
+DII = as.numeric(pData(trim2)$DII)
+BMI = as.numeric(pData(trim2)$BMI)  
+HEI = as.numeric(pData(trim2)$HEI2015Score)
+Age = as.numeric(pData(trim2)$Age)
+EGA = as.numeric(pData(trim2)$Gestational_age)
+FFQ = as.factor(pData(trim2)$FFQ)
+SampleType <- as.factor(pData(trim2)$SampleType)
+normFactor = normFactors(trim2) 
+normFactor = log2(normFactor/median(normFactor) + 1)
+
+
+modDII = model.matrix(~DII + BMI + Age + EGA + SampleType + FFQ + normFactor)
+fitDII = fitZig(obj = trim2, mod = modDII, useCSSoffset = FALSE, control = settings)
+
+#Export the fit
+MRcoefsDII_phylum <- MRcoefs(fitDII, coef = 2)
+
+# assign taxanames
+MRcoefs_taxp <- data.frame(tax_table(ps_phylum))
+MRcoefs_phylum_tax <- MRcoefs_taxp[row.names(MRcoefs_taxp) %in% row.names(MRcoefsDII_phylum), ] 
+MRcoefsDII_phylum <- merge(MRcoefsDII_phylum, MRcoefs_phylum_tax, by = 0, all = TRUE) 
+
+#Plot the Exported Fits ####################################################
+
+#B) DII   ##########################
+MRcoefsDII_phylum <- MRcoefsDII_phylum %>% dplyr::rename(foldchange = 'DII')
+MRcoefsDII_phylum$Phylum <- factor(MRcoefsDII_phylum$Phylum, 
+                              MRcoefsDII_phylum$Phylum[order(MRcoefsDII_phylum$adjPvalues)], 
+                              ordered=T)
+MRcoefsDII_phylum$Plot_names <- c("Actinobacteria (p)", "Bacteroidetes (p)", "Epsilonbacteraeota (p)",
+                                  "Firmicutes (p)", "Fusobacteria (p)", "Proteobacteria (p)", 
+                                  "Verrucomicrobia (p)")
+MRcoefsDII_phylum$just <- ifelse(MRcoefsDII_phylum$foldchange < 0,0,1)
+
+MRcoefsDII_phylum <- MRcoefsDII_phylum[order(MRcoefsDII_phylum$foldchange,
+                                           decreasing=TRUE, na.last=FALSE),]
+
+ggplot(MRcoefsDII_phylum, aes(x=Plot_names, y=foldchange, fill=foldchange)) +
+  geom_bar(stat="identity") +
+  scale_y_continuous("Fold change", limits = c(-2,2), position="left") +
+  scale_x_discrete("", labels = NULL) +
+  scale_fill_gradient2(low="darkblue", high="darkred", midpoint=0,
+                        limits=c(-1,1)) +
+  coord_flip() +
+  theme_minimal()+
+  geom_text(aes(x=Plot_names, y=0, label=Plot_names), hjust=MRcoefsDII_phylum$just)
+```
+
+
+
+
+## 3. Functional Genome - PICRUSt {.tabset}
+*** 
+
+### 3.1 - Background on PICRUSt
+
+__PICRUSt Nature Publication__. 
+https://www.nature.com/articles/s41587-020-0548-6  
+<br />
+
+__Workflow__  
+Cleaned and trimmed ASVs from the DADA2 analysis were used as inputs in PiCrust2 (analysis)[https://github.com/picrust/picrust2/wiki/PICRUSt2-Tutorial-%28v2.3.0-beta%29#minimum-requirements-to-run-full-tutorial]. This will perfom metagenomic predicitons based on amplicon sequencing data. The main steps are,  
+- Place reads into reference tree  
+- Hidden-state prediction of gene families  
+- Generate metagenome predictions  
+- Pathway-level inference  
+
+<br />
+"NSTI scores are simply the average branch length that separates each OTU in your sample from a reference bacterial genome, weighted by the abundance of that OTU in the sample. So the unit for the NSTI score is the same as your reference tree (typically 16S rRNA substitutions/site)" - PiCrust Documentation
+
+<br />
+There are some key limitations to this analysis that can be read [here](https://github.com/picrust/picrust2/wiki/Key-Limitations). The code to run the PiCrust2.0 using the files created in the beginning of the second half of this analysis (after reading back in the phyloseq object). NOTE: You will need to change the file pathnames. The output files will be stored in the specified output folder. 
+
+
+### 3.2 - Creation of input files for PICRUSt
+Phylogenetic Investigation of Communities by Reconstruction of Unobserved States allows you to predict metagenome functional content from marker gene (e.g., 16S rRNA) surveys. In this section, we will generate the required files to run PICRUSt in terminal. [Tutorial](http://picrust.github.io/picrust/tutorials/genome_prediction.html) input
+
+```{r}
+#Step 1: Get fasta ASVs 
+##########################################################
+#get OTUs
+otus <- as(otu_table(css),"matrix")
+
+#Change seq headers to asv number (ASV_1, ASV_2...)
+asv_seqs <- colnames(t(otus))
+asv_headers <- vector(dim(t(otus))[2], mode="character")
+for (i in 1:dim(t(otus))[2]) {
+  asv_headers[i] <- paste(">ASV", i, sep="_")}
+
+#Create and write out a fasta of our final ASV seqs
+asv_fasta <- c(rbind(asv_headers, asv_seqs))
+write(asv_fasta, here("Data", "DADA2toPiCrust_Data", "ASVs.fa"))
+
+#Step 2: Get ASVs count table 
+##########################################################
+asv_tab <- (otus)
+row.names(asv_tab) <- sub(">", "", asv_headers)
+write.table(asv_tab, here("Data", "DADA2toPiCrust_Data", "ASVs_counts.tsv"), sep="\t", quote=F, col.names=NA)
+
+
+#Step 3: Get tsv (taxa assignments) 
+##########################################################
+asv_tax <- as(tax_table(css),"matrix")
+row.names(asv_tax) <- sub(">", "", asv_headers)
+write.table(asv_tax, here("Data", "DADA2toPiCrust_Data", "ASVs_taxonomy.tsv"), sep = "\t", quote=F, col.names=NA)
+
+# To merge asv abundance and taxonomy into one file #####################################################
+#OTU_TAX_table <- merge(asv_tab, asv_tax, by=0)
+#write.table(OTU_TAX_table, here("Data", "DADA2toPiCrust_Data", "OTU_TAX_table.tsv"), sep = "\t", quote=F, col.names=NA)
+
+```
+
+### 3.3 - Terminal Code for running PICRUSt
+<br />
+__Code for creating the Picrust2.0 environment in terminal__  
+conda create -n picrust2 -c bioconda -c conda-forge picrust2=2.3.0_b  
+conda activate picrust2  
+
+<br />
+__Code for running the pipeline on the appropriate files__  
+picrust2_pipeline.py -s /Users/bealab/Desktop/Mat_Diet_noseq_true/Data/DADA2toPiCrust_Data/ASVs.fa -i /Users/bealab/Desktop/Mat_Diet_noseq_true/Data/DADA2toPiCrust_Data/ASVs_counts.tsv -o /Users/bealab/Desktop/Mat_Diet_noseq_true/Data/DADA2toPiCrust_Data/picrust2_out_pipeline -p 1
+
+<br />
+
+__NOTES FROM RUNNING PICRUST__  
+0 taxa were removed
+
+
+### 3.4 - Differentially Abundant Pathways & Enzymes
+
+
+#### 3.4.1 - DII Enriched Pathways
+```{r}
+#Step 1: Read in the Data
+######################################################################
+PiCrust_paths <- read_tsv(here("Data", "DADA2toPiCrust_Data", "picrust2_out_pipeline", "pathways_out", "path_abun_unstrat.tsv"))
+
+#Count data
+PiCrust_paths <- column_to_rownames(PiCrust_paths, "pathway")
+
+#Metadata
+meta_info <- AnnotatedDataFrame(info)
+
+#Step 2: Create a metagenomeSeq object to perform analysis 
+######################################################################
+PiCrust_meta <- newMRexperiment(counts=PiCrust_paths, phenoData = meta_info)
+
+
+#Step 3: Run Metagenomseq - fitZig 
+######################################################################
+#Statistical Testing - Make the 0-inflated Gaussian Model
+rareFeatures = which(rowSums(MRcounts(PiCrust_meta) > 0) < 10)
+trim = PiCrust_meta[-rareFeatures, ]
+trimp = cumNormStat(trim, pFlag = TRUE, main = "Trimmed data")
+trim2 = cumNorm(trim, p = trimp)
+
+
+#Prep for the Model- Multiple univariate models
+DII = as.numeric(pData(trim2)$DII) 
+BMI = as.numeric(pData(trim2)$BMI)
+Age = as.numeric(pData(trim2)$Age)
+EGA = as.numeric(pData(trim2)$Gestational_age)
+FFQ = as.factor(pData(trim2)$FFQ)
+SampleType = as.factor(pData(trim2)$SampleType)
+normFactor = normFactors(trim2)
+normFactor = log2(normFactor/median(normFactor) + 1)
+
+#Model 1: Compare pathway changes to continuous DII score, corrected by BMI, Age, EGA
+######################################################################
+mod = model.matrix(~DII + BMI+ Age + EGA+ FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant pathways
+MRcoefs <- MRcoefs(fit, coef = 2)
+MRcoefs <- MRcoefs %>% subset(adjPvalues < 0.1)
+
+
+#Plot the Exported Fits
+MRcoefs <- MRcoefs %>% dplyr::rename(foldchange = 'DII')
+rownames(MRcoefs) <- make.unique(rownames(MRcoefs), sep = '.')
+rownames(MRcoefs) <- factor(rownames(MRcoefs),
+rownames(MRcoefs)[order(MRcoefs$adjPvalues)], ordered=T)
+MRcoefs$just <- ifelse(MRcoefs$foldchange < 0,0,1)
+
+#Order by fold change
+rownames(MRcoefs) = with(MRcoefs, reorder(rownames(MRcoefs), foldchange, median))
+
+ggplot(MRcoefs, aes(x=rownames(MRcoefs), y=foldchange, fill=foldchange)) +
+  geom_bar(stat="identity") +
+  scale_y_continuous("Fold change", limits = c(-1,1), position="left") +
+  scale_x_discrete("", labels = NULL) +
+  scale_fill_gradient2(low="darkred", high="darkblue", midpoint=0,
+                        limits=c(-1,1)) +
+  coord_flip() +
+  theme_minimal()+
+  geom_text(aes(x=rownames(MRcoefs), y=0, label=rownames(MRcoefs)), hjust=MRcoefs$just)
+
+```
+
+
+##### 3.4.1.1 - Investigation of Enriched Pathway. 
+
+
+```{r}
+# Obtain KOs/sample ID
+########################################################################
+KO_SID_table <- read_tsv(here::here("Data","DADA2toPiCrust_Data", "picrust2_out_pipeline","KO_metagenome_out", "pred_metagenome_unstrat.tsv"))
+KO_SID_table <- as.data.frame(KO_SID_table)
+KO_SID_table <- column_to_rownames(KO_SID_table, "function")
+
+```
+
+
+#### 3.4.2 - DII Enriched KOs (Enzymes)
+
+__Read in diet Data Prep__. 
+```{r}
+#Step 1: Read in the DII data
+########################################################################
+DII_parameters <- read.csv(here("Output", "Diet_Output", "DII_parameters_data.csv"))
+DII_parameters <- DII_parameters[,-1]
+
+#merge with sample info
+info_DII_param <- data.frame(info)
+DII_param_info <- merge(info_DII_param, DII_parameters, by="redcapid")
+DII_param_info <- DII_param_info %>% column_to_rownames("SampleID")
+DII_param_info <- data.frame(DII_param_info)
+
+#Edit column names to remove units
+names(DII_param_info) <- gsub("..g.", "", names(DII_param_info))
+names(DII_param_info) <- gsub("..mg.", "", names(DII_param_info))
+names(DII_param_info) <- gsub("..μg.", "", names(DII_param_info))
+names(DII_param_info) <- gsub("..RE.", "", names(DII_param_info))
+names(DII_param_info) <- gsub("..kcal.", "", names(DII_param_info))
+names(DII_param_info) <- gsub("\\.$", "", names(DII_param_info))
+
+#Rename some of the column names to full
+DII_param_info <- DII_param_info %>% 
+        rename("Energy" = "En",
+               "Fiber" = "Fibre",
+               "Iron" = "Fe",
+               "Magnesium" = "Mg",
+               "Selenium" = "Se",
+               "Zinc" = "Zn")
+
+
+ordered_ids <- match(rownames(info), rownames(DII_param_info))
+
+DII_param_info  <- DII_param_info[ordered_ids, ]
+
+#Make Metadata
+meta_diet_info <- AnnotatedDataFrame(DII_param_info)
+```
+
+
+__KOs by DII score__
+```{r}
+
+#Step 2: Create a metagenomeSeq object to peform analysis 
+########################################################################
+KOs_meta <- newMRexperiment(counts=KO_SID_table, phenoData = meta_diet_info)
+
+#Step 3: Run Metagenomseq - fitZig 
+########################################################################
+#Statistical Testing - Make the 0-inflated Gaussian Model
+rareFeatures = which(rowSums(MRcounts(KOs_meta) > 0) < 10)
+trim = KOs_meta[-rareFeatures, ]
+trimp = cumNormStat(trim, pFlag = TRUE, main = "Trimmed data")
+trim2 = cumNorm(trim, p = trimp)
+
+#Prep for the Model
+DII = as.numeric(pData(trim2)$DII)
+BMI = as.numeric(pData(trim2)$BMI)
+Age = as.numeric(pData(trim2)$Age)
+EGA = as.numeric(pData(trim2)$Gestational)
+FFQ = as.factor(pData(trim2)$FFQ)
+SampleType <- as.factor(pData(trim2)$SampleType)
+normFactor = normFactors(trim2)
+normFactor = log2(normFactor/median(normFactor) + 1)
+
+#Model: Compare Enzyme changes to continuous DII change, corrected by BMI, Age, EGA
+########################################################################
+mod = model.matrix(~DII + BMI+ Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+MRcoefs_KO_all <- MRcoefs(fit, coef = 2, number = 5638)
+MRcoefs_KO_all <- MRcoefs_KO_all %>% subset(adjPvalues < 0.050)
+MRcoefs_KO_all <- MRcoefs_KO_all %>% dplyr::rename(foldchange = 'DII')
+
+knitr::kable(
+  list(MRcoefs_KO_all[1:23,], MRcoefs_KO_all[24:46,],MRcoefs_KO_all[47:70,]),
+  booktabs = TRUE
+)
+
+MRcoefs_KO <- MRcoefs(fit, coef = 2, number = 200)
+MR_coefs_GSEA <- MRcoefs_KO %>% subset(pvalues < 0.050)
+
+MRcoefs_KO <- MRcoefs_KO %>% subset(adjPvalues < 0.050)
+MRcoefs_KO_top <- MRcoefs(fit, coef = 2, number = 15)
+
+MRcoefs_KO_top$Enzyme_Name <- c(
+          "Two-component systems (K07642)",
+          "D-galactonate transporter (K08194)",
+          "Beta-glucoside kinase (K18673)",
+          "Multidrug efflux pump (K18889)",
+          "Beta-Lactam resistance (K18148)",
+          "ABC-Cellobiose transport (K10240)",
+          "ABC-Cellobiose transport (K10241)",
+          "ABC-Multiple Sugar Transport (K10111)",
+          "Beta-galactosidase (K12112)", 
+          "Sialic acid transporter (K03290)",
+          "DNA-binding protein (K05787)",
+          "ABC-Diacetylchitobiose transport (K17329)", 
+          "ABC-Diacetylchitobiose transport (K17330)", 
+          "Formate transporter (K06212)", 
+          "NAD(P)H dehydrogenase (K03809)")
+
+
+#Plot the Exported Fits
+MRcoefs_KO_top <- MRcoefs_KO_top %>% dplyr::rename(foldchange = 'DII')
+
+#Add in justification
+MRcoefs_KO_top$just <- ifelse(MRcoefs_KO_top$foldchange < 0,0,1)
+
+#Order by foldchange value
+MRcoefs_KO_top$Enzyme_Name = with(MRcoefs_KO_top, reorder(Enzyme_Name, foldchange, median))
+
+#Make the plot
+ggplot(MRcoefs_KO_top, aes(x=Enzyme_Name, y=foldchange, fill=foldchange)) +
+  geom_bar(stat="identity") +
+  scale_y_continuous("Fold change", limits = c(-1,1), position="left") +
+  scale_x_discrete("", labels = NULL) +
+  scale_fill_gradient2(low="darkred", high="darkblue", midpoint=0,
+                        limits=c(-1,1)) +
+  coord_flip() +
+  theme_minimal()+
+  theme(axis.text=element_text(size=12)) +
+  geom_text(aes(x=Enzyme_Name, y=0, label=Enzyme_Name), hjust=MRcoefs_KO_top$just)
+```
+
+
+
+
+__Export KO Lists__. 
+```{r}
+write.csv(MR_coefs_GSEA, here("Output", "Microbiome_Output", "Enriched_KOs.csv"))
+
+write.csv(MRcoefs_KO, here("Output", "Microbiome_Output", "FDR_Enriched_KOs.csv"))
+```
+
+
+
+
+##### 3.4.2.1 - KOs and DII parameters  
+Investigation of which DII food parameters are driving the score and their association with the KOs
+
+
+__Spearman Correlation of Food Parameters__. 
+```{r, warning=FALSE}
+#Step 1; Prep the Data with the appropriate parameters
+########################################################################
+DII_param_cor <- DII_param_info[,c(26,42:68)]
+DII_param_cor <- sapply(DII_param_cor, as.numeric)
+
+plot_data <- as.data.frame(DII_param_cor)
+
+#Formula is nutrient/Kcal intake * 1000
+e_plotdata <- plot_data[,]/plot_data$Energy*1000
+
+e_plotdata$Energy <- plot_data$Energy
+e_plotdata$DII <- plot_data$DII
+
+plot(e_plotdata$Total.fat, e_plotdata$Fiber)
+
+
+#Step 2: Run the Spearman Correlation and p Test for significance
+########################################################################
+Cor <- rcorr(as.matrix(e_plotdata), type = "spearman")
+
+#Plot only the significant coefficients 
+corrplot(Cor$r, type = "upper", order = "hclust", 
+         p.mat = Cor$P, sig.level = 0.05, 
+         tl.cex = 0.7, tl.col = "black", 
+         insig = "blank", cl.p = "r", diag = FALSE)
+
+
+```
+
+
+
+
+
+__DII Food parameters table__  
+```{r}
+#Make printable table
+DII_param_print <- e_plotdata
+DII_param_print$tertiles <- DII_param_info$tertiles
+# Final Crosstable 
+#######################################################
+explanatory = c("Alcohol","Vitamin.B12","Vitamin.B6","β.Carotene",
+                "Caffeine","Carbohydrate","Cholesterol","Energy","Total.fat",
+                "Fiber","Folic.acid","Iron","Magnesium","MUFA","Niacin","Protein",
+                "PUFA","Riboflavin","Saturated.fat","Selenium","Thiamin","Trans.fat",
+                "Vitamin.A","Vitamin.C","Vitamin.D","Vitamin.E","Zinc")
+dependent = "tertiles"
+DII_param_print %>%
+  summary_factorlist(dependent, explanatory, 
+  p=TRUE, add_dependent_label=TRUE) -> t1
+
+t1$p <- as.character(round(as.numeric(t1$p),digit=2))
+t1$p <- replace(t1$p, is.na(t1$p), "")
+
+knitr::kable(t1, align=c("l", "l", "r", "r", "r"))
+```
+
+
+
+__Check Vitamin B12 status by tertiles and groups__  
+```{r}
+# Step 1: Print mean Vitamin B12 by tertile
+#############################################################################
+vitamin_b12_mean <- mean(DII_param_info$Vitamin.B12[DII_param_info$tertiles == "Tertile 1"], na.rm = TRUE)
+vitamin_b12_sd <- sd(DII_param_info$Vitamin.B12[DII_param_info$tertiles == "Tertile 1"], na.rm = TRUE)
+cat("Mean of Vitamin.B12 for Tertile 1:", vitamin_b12_mean, "\n")
+cat("SD of Vitamin.B12 for Tertile 1:", vitamin_b12_sd, "\n")
+
+vitamin_b12_mean <- mean(DII_param_info$Vitamin.B12[DII_param_info$tertiles == "Tertile 2"], na.rm = TRUE)
+cat("Mean of Vitamin.B12 for Tertile 2:", vitamin_b12_mean, "\n")
+
+vitamin_b12_mean <- mean(DII_param_info$Vitamin.B12[DII_param_info$tertiles == "Tertile 3"], na.rm = TRUE)
+cat("Mean of Vitamin.B12 for Tertile 3:", vitamin_b12_mean, "\n")
+
+vitamin_b12_mean <- mean(DII_param_info$Vitamin.B12[DII_param_info$tertiles == "Tertile 2"|
+                                                      DII_param_info$tertiles == "Tertile 3"], na.rm = TRUE)
+vitamin_b12_sd <- sd(DII_param_info$Vitamin.B12[DII_param_info$tertiles == "Tertile 2"|
+                                                      DII_param_info$tertiles == "Tertile 3"], na.rm = TRUE)
+cat("Mean of Vitamin.B12 for Tertile 2/3:", vitamin_b12_mean, "\n")
+cat("SD of Vitamin.B12 for Tertile 2/3:", vitamin_b12_sd, "\n")
+
+# Step 2: ANOVA to compare means by tertile
+#############################################################################
+#anova to check difference in vitamin B12
+summary(aov(Vitamin.B12 ~ tertiles + Age + EGA, data=DII_param_info))
+mean(DII_param_info$Vitamin.B12)
+
+
+
+# Step 3: T.Test to compare difference in Vitamin B12 between Tertile 1 and Tertile 2/3
+#############################################################################
+ggplot(DII_param_info, aes(x = group, y = Vitamin.B12, fill = group)) +
+  geom_boxplot() +
+  theme_minimal() + 
+  scale_fill_manual(values=c("red","blue")) +
+  stat_compare_means(comparisons = list(c("Tertile 1", "Tertile 2/3")),
+                     label = "p.signif", method = "t.test",
+                     hide.ns = TRUE, size = 4) +
+  xlab("") +
+  ylab("Vitamin B12 (μg)")
+
+
+```
+
+
+
+
+__PCA of the Food parameters__. 
+```{r}
+#Step 1; Prep the Data with the appropriate parameters
+########################################################################
+DII_PCA_data <- e_plotdata[,-1]
+DII_PCA_data <- sapply(DII_PCA_data, as.numeric)
+
+#Remove characters after .
+DII_PCA_data <- as.data.frame(DII_PCA_data)
+
+
+#Step 2: Run the PCA
+########################################################################
+pca_res <- prcomp(DII_PCA_data , scale. = TRUE)
+
+#Add group info
+DII_PCA_data$Tertile <- DII_param_info$tertiles
+
+#Plot the PCA
+p <- autoplot(pca_res, data = DII_PCA_data, 
+              loadings = TRUE,
+         loadings.colour = 'lightblue', 
+         colour = "Tertile",
+         loadings.label = TRUE, 
+         loadings.label.size = 3.8, 
+         loadings.label.colour = "black",
+         loadings.label.repel = T) +
+         scale_colour_manual(values=c("white", "white","white")) + 
+  theme_minimal()
+  
+p$layers[[2]]$aes_params$size <- 0.2
+p
+
+
+
+#Step 2: Extract Loadings
+########################################################################
+PCA_loadings <- as.data.frame(pca_res$rotation)
+PCA_loadings <- data.frame(PCA_loadings[,c(1:2)])
+knitr::kable(
+  list(PCA_loadings[1:14,], PCA_loadings[15:27,]),
+  booktabs = TRUE
+)
+```
+
+
+
+__MetagenomSeq of KOs & Food__  
+```{r}
+# Step 1: Make a KO Table
+#######################################################################################
+#Filter to only significiant KOs
+sig_KO_vector <- rownames(MRcoefs_KO_top)
+Enriched_KOs <- KO_SID_table[sig_KO_vector, ]
+
+#z-score the food paramters
+DII_param_info_z <- DII_param_info
+DII_param_info_z[,42:68] <- scale(DII_param_info_z[,42:68])
+meta_diet_info_z <- AnnotatedDataFrame(DII_param_info_z)
+
+#MetagenomeSeq object of only significantly enriched KOs
+Enriched_KOs_meta <- newMRexperiment(counts=Enriched_KOs, phenoData = meta_diet_info_z)
+
+
+#Step 2: Run Metagenomseq - fitZig 
+######################################################################################
+#Statistical Testing - Make the 0-inflated Gaussian Model
+rareFeatures = which(colSums(MRcounts(Enriched_KOs_meta)) == 0)
+trim = Enriched_KOs_meta[,-rareFeatures]
+trimp = cumNormStat(trim, pFlag = TRUE, main = "Trimmed data")
+trim2 = cumNorm(trim, p = trimp)
+
+#Prep for the Model
+DII = as.numeric(pData(trim2)$DII)
+BMI = as.numeric(pData(trim2)$BMI)
+Age = as.numeric(pData(trim2)$Age)
+EGA = as.numeric(pData(trim2)$Gestational)
+FFQ = as.factor(pData(trim2)$FFQ)
+SampleType <- as.factor(pData(trim2)$SampleType)
+Alcohol = as.numeric(pData(trim2)$Alcohol)
+Vitamin.B12 = as.numeric(pData(trim2)$Vitamin.B12)
+Vitamin.B6 = as.numeric(pData(trim2)$Vitamin.B6)
+β.Carotene = as.numeric(pData(trim2)$β.Carotene)
+Caffeine = as.numeric(pData(trim2)$Caffeine)
+Carbohydrate = as.numeric(pData(trim2)$Carbohydrate)
+Cholesterol = as.numeric(pData(trim2)$Cholesterol)
+Energy = as.numeric(pData(trim2)$Energy)
+Total.fat = as.numeric(pData(trim2)$Total.fat)
+Fiber = as.numeric(pData(trim2)$Fiber)
+Folic.acid = as.numeric(pData(trim2)$Folic.acid)
+Iron = as.numeric(pData(trim2)$Iron)
+Magnesium = as.numeric(pData(trim2)$Magnesium)
+MUFA = as.numeric(pData(trim2)$MUFA)
+Nicain = as.numeric(pData(trim2)$Niacin)
+Protein = as.numeric(pData(trim2)$Protein)
+PUFA = as.numeric(pData(trim2)$PUFA)
+Riboflavin = as.numeric(pData(trim2)$Riboflavin)
+Saturated.fat = as.numeric(pData(trim2)$Saturated.fat)
+Selenium = as.numeric(pData(trim2)$Selenium)
+Thiamin = as.numeric(pData(trim2)$Thiamin)
+Trans.fat = as.numeric(pData(trim2)$Trans.fat)
+Vitamin.A = as.numeric(pData(trim2)$Vitamin.A)
+Vitamin.C = as.numeric(pData(trim2)$Vitamin.C)
+Vitamin.D = as.numeric(pData(trim2)$Vitamin.D)
+Vitamin.E = as.numeric(pData(trim2)$Vitamin.E)
+Zinc = as.numeric(pData(trim2)$Zinc)
+
+normFactor = normFactors(trim2)
+normFactor = log2(normFactor/median(normFactor) + 1)
+
+```
+
+
+```{r}
+# Alcohol
+########################################################################
+mod = model.matrix(~Alcohol + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Alc_sig <- MRcoefs(fit, coef = 2, number = 15)
+Alc_sig <- mutate(Alc_sig,Alcohol=if_else(adjPvalues>0.05, 0, Alcohol))
+Alc_sig <- Alc_sig[,-c(2,3)]
+
+# Vitamin B12
+########################################################################
+mod = model.matrix(~Vitamin.B12 + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+VB12_sig <- MRcoefs(fit, coef = 2, number = 15)
+VB12_sig <- mutate(VB12_sig, Vitamin.B12=if_else(adjPvalues>0.05, 0, Vitamin.B12))
+VB12_sig <- VB12_sig[,-c(2,3)]
+
+# Vitamin B6
+########################################################################
+mod = model.matrix(~Vitamin.B6 + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+VB6_sig <- MRcoefs(fit, coef = 2, number = 15)
+VB6_sig <- mutate(VB6_sig, Vitamin.B6=if_else(adjPvalues>0.05, 0, Vitamin.B6))
+VB6_sig <- VB6_sig[,-c(2,3)]
+
+
+# β.Carotene
+########################################################################
+mod = model.matrix(~β.Carotene + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+β.Car_sig <- MRcoefs(fit, coef = 2, number = 15)
+β.Car_sig <- mutate(β.Car_sig, β.Carotene=if_else(adjPvalues>0.05, 0, β.Carotene))
+β.Car_sig <- β.Car_sig[,-c(2,3)]
+
+
+# Caffeine
+########################################################################
+mod = model.matrix(~Caffeine + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Caff_sig <- MRcoefs(fit, coef = 2, number = 15)
+Caff_sig <- mutate(Caff_sig, Caffeine=if_else(adjPvalues>0.05, 0, Caffeine))
+Caff_sig <- Caff_sig[,-c(2,3)]
+
+
+
+# Carbohydrate
+########################################################################
+mod = model.matrix(~Carbohydrate + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Carb_sig <- MRcoefs(fit, coef = 2, number = 15)
+Carb_sig <- mutate(Carb_sig, Carbohydrate=if_else(adjPvalues>0.05, 0, Carbohydrate))
+Carb_sig <- Carb_sig[,-c(2,3)]
+
+
+# Cholesterol
+########################################################################
+mod = model.matrix(~Cholesterol + BMI + Age + EGA + FFQ + SampleType +  normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Chol_sig <- MRcoefs(fit, coef = 2, number = 15)
+Chol_sig <- mutate(Chol_sig, Cholesterol=if_else(adjPvalues>0.05, 0, Cholesterol))
+Chol_sig <- Chol_sig[,-c(2,3)]
+
+
+# Energy
+########################################################################
+mod = model.matrix(~Energy + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Energy_sig <- MRcoefs(fit, coef = 2, number = 15)
+Energy_sig <- mutate(Energy_sig, Energy=if_else(adjPvalues>0.05, 0, Energy))
+Energy_sig <- Energy_sig[,-c(2,3)]
+
+ 
+
+# Total.fat
+########################################################################
+mod = model.matrix(~Total.fat + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+T.fat_sig <- MRcoefs(fit, coef = 2, number = 15)
+T.fat_sig <- mutate(T.fat_sig, Total.fat=if_else(adjPvalues>0.05, 0, Total.fat))
+T.fat_sig <- T.fat_sig[,-c(2,3)]
+
+
+# Fiber
+########################################################################
+mod = model.matrix(~Fiber + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Fib_sig <- MRcoefs(fit, coef = 2, number = 15)
+Fib_sig <- mutate(Fib_sig, Fiber=if_else(adjPvalues>0.05, 0, Fiber))
+Fib_sig <- Fib_sig[,-c(2,3)]
+
+
+
+# Folic.acid
+########################################################################
+mod = model.matrix(~Folic.acid + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Folic_sig <- MRcoefs(fit, coef = 2, number = 15)
+Folic_sig <- mutate(Folic_sig, Folic.acid=if_else(adjPvalues>0.05, 0, Folic.acid))
+Folic_sig <- Folic_sig[,-c(2,3)]
+
+
+
+# Iron
+########################################################################
+mod = model.matrix(~Iron + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Iron_sig <- MRcoefs(fit, coef = 2, number = 15)
+Iron_sig <- mutate(Iron_sig, Iron=if_else(adjPvalues>0.05, 0, Iron))
+Iron_sig <- Iron_sig[,-c(2,3)]
+
+
+# Magnesium
+########################################################################
+mod = model.matrix(~Magnesium + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Mag_sig <- MRcoefs(fit, coef = 2, number = 15)
+Mag_sig <- mutate(Mag_sig, Magnesium=if_else(adjPvalues>0.05, 0, Magnesium))
+Mag_sig <- Mag_sig[,-c(2,3)]
+
+
+
+# MUFA
+########################################################################
+mod = model.matrix(~MUFA + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+MUFA_sig <- MRcoefs(fit, coef = 2, number = 15)
+MUFA_sig <- mutate(MUFA_sig, MUFA=if_else(adjPvalues>0.05, 0, MUFA))
+MUFA_sig <- MUFA_sig[,-c(2,3)]
+
+
+# Nicain
+########################################################################
+mod = model.matrix(~Nicain + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Nicain_sig <- MRcoefs(fit, coef = 2, number = 15)
+Nicain_sig <- mutate(Nicain_sig, Nicain=if_else(adjPvalues>0.05, 0, Nicain))
+Nicain_sig <- Nicain_sig[,-c(2,3)]
+
+
+# Protein
+########################################################################
+mod = model.matrix(~Protein + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Protein_sig <- MRcoefs(fit, coef = 2, number = 15)
+Protein_sig <- mutate(Protein_sig, Protein=if_else(adjPvalues>0.05, 0, Protein))
+Protein_sig <- Protein_sig[,-c(2,3)]
+
+
+# PUFA
+########################################################################
+mod = model.matrix(~PUFA + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+PUFA_sig <- MRcoefs(fit, coef = 2, number = 15)
+PUFA_sig <- mutate(PUFA_sig, PUFA=if_else(adjPvalues>0.05, 0, PUFA))
+PUFA_sig <- PUFA_sig[,-c(2,3)]
+
+
+# Riboflavin
+########################################################################
+mod = model.matrix(~Riboflavin + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Ribo_sig <- MRcoefs(fit, coef = 2, number = 15)
+Ribo_sig <- mutate(Ribo_sig, Riboflavin=if_else(adjPvalues>0.05, 0, Riboflavin))
+Ribo_sig <- Ribo_sig[,-c(2,3)]
+
+
+# Saturated.fat
+########################################################################
+mod = model.matrix(~Saturated.fat + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+SatFat_sig <- MRcoefs(fit, coef = 2, number = 15)
+SatFat_sig <- mutate(SatFat_sig, Saturated.fat=if_else(adjPvalues>0.05, 0, Saturated.fat))
+SatFat_sig <- SatFat_sig[,-c(2,3)]
+
+
+# Selenium
+########################################################################
+mod = model.matrix(~Selenium + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Selenium_sig <- MRcoefs(fit, coef = 2, number = 15)
+Selenium_sig <- mutate(Selenium_sig, Selenium=if_else(adjPvalues>0.05, 0, Selenium))
+Selenium_sig <- Selenium_sig[,-c(2,3)]
+
+
+# Thiamin
+########################################################################
+mod = model.matrix(~Thiamin + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Thiamin_sig <- MRcoefs(fit, coef = 2, number = 15)
+Thiamin_sig <- mutate(Thiamin_sig, Thiamin=if_else(adjPvalues>0.05, 0, Thiamin))
+Thiamin_sig <- Thiamin_sig[,-c(2,3)]
+
+
+# Trans.fat
+########################################################################
+mod = model.matrix(~Trans.fat + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Trans.fat_sig <- MRcoefs(fit, coef = 2, number = 15)
+Trans.fat_sig <- mutate(Trans.fat_sig, Trans.fat=if_else(adjPvalues>0.05, 0, Trans.fat))
+Trans.fat_sig <- Trans.fat_sig[,-c(2,3)]
+
+
+# Vitamin.A
+########################################################################
+mod = model.matrix(~Vitamin.A + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Vitamin.A_sig <- MRcoefs(fit, coef = 2, number = 15)
+Vitamin.A_sig <- mutate(Vitamin.A_sig, Vitamin.A=if_else(adjPvalues>0.05, 0, Vitamin.A))
+Vitamin.A_sig <- Vitamin.A_sig[,-c(2,3)]
+
+
+# Vitamin.C
+########################################################################
+mod = model.matrix(~Vitamin.C + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Vitamin.C_sig <- MRcoefs(fit, coef = 2, number = 15)
+Vitamin.C_sig <- mutate(Vitamin.C_sig, Vitamin.C=if_else(adjPvalues>0.05, 0, Vitamin.C))
+Vitamin.C_sig <- Vitamin.C_sig[,-c(2,3)]
+
+
+# Vitamin.D
+########################################################################
+mod = model.matrix(~Vitamin.D + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Vitamin.D_sig <- MRcoefs(fit, coef = 2, number = 15)
+Vitamin.D_sig <- mutate(Vitamin.D_sig, Vitamin.D=if_else(adjPvalues>0.05, 0, Vitamin.D))
+Vitamin.D_sig <- Vitamin.D_sig[,-c(2,3)]
+
+
+# Vitamin.E
+########################################################################
+mod = model.matrix(~Vitamin.E + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Vitamin.E_sig <- MRcoefs(fit, coef = 2, number = 15)
+Vitamin.E_sig <- mutate(Vitamin.E_sig, Vitamin.E=if_else(adjPvalues>0.05, 0, Vitamin.E))
+Vitamin.E_sig <- Vitamin.E_sig[,-c(2,3)]
+
+
+# Zinc
+########################################################################
+mod = model.matrix(~Zinc + BMI + Age + EGA + FFQ + SampleType + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE)
+fit = fitZig(obj = trim2, mod = mod, useCSSoffset = FALSE, control = settings)
+
+#pull only the significant enzymes
+Zinc_sig <- MRcoefs(fit, coef = 2, number = 15)
+Zinc_sig <- mutate(Zinc_sig, Zinc=if_else(adjPvalues>0.05, 0, Zinc))
+Zinc_sig <- Zinc_sig[,-c(2,3)]
+```
+
+Plot the data
+```{r}
+# Make the dataframe
+########################################################################
+KO_parameter_fitzig <- data.frame(Alc_sig,VB12_sig,VB6_sig,β.Car_sig,Caff_sig,Carb_sig,Chol_sig,Energy_sig,
+  T.fat_sig,Fib_sig,Folic_sig,Iron_sig,Mag_sig,MUFA_sig,Nicain_sig,Protein_sig,
+  PUFA_sig,Ribo_sig,SatFat_sig,Selenium_sig,Thiamin_sig,Trans.fat_sig,Vitamin.A_sig,
+  Vitamin.C_sig,Vitamin.D_sig,Vitamin.E_sig,Zinc_sig)
+
+
+# Add KO names
+########################################################################
+rownames(KO_parameter_fitzig) <- c(
+          "Two-component systems (K07642)",
+          "D-galactonate transporter (K08194)",
+          "beta-glucoside kinase (K18673)",
+          "Multidrug efflux pump (K18889)",
+          "Beta-Lactam resistance (K18148)",
+          "ABC - Cellobiose transport (K10240)",
+          "ABC - Cellobiose transport (K10241)",
+          "ABC - Multiple Sugar Transport (K10111)",
+          "Beta-galactosidase (K12112)", 
+          "Sialic acid transporter (K03290)",
+          "DNA-binding protein (K05787)",
+          "ABC - Diacetylchitobiose transport (K17329)", 
+          "ABC - Diacetylchitobiose transport (K17330)", 
+          "Formate transporter (K06212)", 
+          "NAD(P)H dehydrogenase (quinone) (K03809)")
+
+
+# Rename Columns
+########################################################################
+KO_parameter_fitzig <- KO_parameter_fitzig %>% rename("Alcohol" = Alc_sig,
+                                                      "Vitamin B12" = VB12_sig,
+                                                      "Vitamin B6" = VB6_sig,
+                                                      "β Carotene" = β.Car_sig,
+                                                      "Caffeine" = Caff_sig,
+                                                      "Carbohydrate" = Carb_sig,
+                                                      "Cholesterol" = Chol_sig,
+                                                      "Energy" = Energy_sig,
+                                                      "Total Fat" = T.fat_sig,
+                                                      "Fiber" = Fib_sig,
+                                                      "Folic Acid" = Folic_sig,
+                                                      "Iron" = Iron_sig,
+                                                      "Magnesium" = Mag_sig,
+                                                      "MUFA" = MUFA_sig,
+                                                      "Niacin" = Nicain_sig,
+                                                      "Protein" = Protein_sig,
+                                                      "PUFA" = PUFA_sig,
+                                                      "Riboflavin" = Ribo_sig,
+                                                      "Saturated Fat" = SatFat_sig,
+                                                      "Selenium" = Selenium_sig,
+                                                      "Thiamin" = Thiamin_sig,
+                                                      "Transaturated Fat" = Trans.fat_sig,
+                                                      "Vitamin A" = Vitamin.A_sig,
+                                                      "Vitamin C" = Vitamin.C_sig,
+                                                      "Vitamin D" = Vitamin.D_sig,
+                                                      "Vitamin E" = Vitamin.E_sig,
+                                                      "Zinc" = Zinc_sig)
+
+#Drop columns that sum to 0
+KO_parameter_fitzig <-  KO_parameter_fitzig[, colSums(KO_parameter_fitzig != 0) > 0]
+KO_parameter_fitzig <-  KO_parameter_fitzig[rowSums(KO_parameter_fitzig != 0) > 0,]
+
+KO_parameter_plotting <- KO_parameter_fitzig %>%
+  rownames_to_column() %>%
+  gather(colname, value, -rowname)
+
+KO_parameter_plotting <- KO_parameter_plotting %>% rename("foldchange" = "value")
+
+# Make the Plot
+########################################################################
+ggplot(KO_parameter_plotting, aes(x = rowname, y = colname, fill = foldchange)) +
+  geom_tile() +
+  scale_fill_gradient2(high="darkblue", low="darkred", midpoint=0,
+                        limits=c(-1.5,1.5)) + 
+  theme(axis.text.x = element_text(size =10, angle = 45, vjust= 0.85, hjust= 0.85, colour="black"),
+        axis.text.y = element_text(size =10, colour="black")) +
+  xlab("") +
+  ylab("")
+
+```
+
+
+
+##### 3.4.2.2 - Gene Set Enrichment Analysis
+
+Running a gene set enrichment analysis on the identified KOs from the  0-inflated model. For this, we used [MicrobiomeProfiler](https://github.com/YuLab-SMU/MicrobiomeProfiler). To do so, take the terms that were differential increased as opposed to enriched in terms of DII.  
+
+
+
+__Notes on Installation__  
+Make sure its the correct bioconductor version
+
+__Run Microbiome Profiler__  
+```{r}
+#Launch the HTML
+#run_MicrobiomeProfiler()
+
+```
+
+
+__Make Plot of Results__  
+Saved the results from MicrobiomeProfiler to an excel file for easy plotting. Note: used the FDR enriched KO lists
+```{r}
+#Step 1: Read in the Data
+################################################################
+GSEA_data <- read_excel(here("Output", "GSEA_Output", "GSEA_Results.xlsx"))
+
+#Relabel the ratios for plotting
+GSEA_data$GeneRatio <- c(6/101, 12/101, 4/101, 4/101)
+
+
+#Step 2: Plot
+################################################################
+ggplot(data = GSEA_data, aes(x = Condition, y = Term, 
+                        color = `p.adjust`, size = GeneRatio)) + 
+  geom_point() +
+  scale_color_gradient(low = "red", high = "blue") +
+  scale_size_continuous(range = c(2.5, 6)) +
+  theme_bw() + 
+  ylab("") + 
+  xlab("") + 
+  ggtitle("GO enrichment analysis") + 
+  theme(axis.text = element_text(size = 15))
+```
+
+
+
+
+
+
+
+
+
+
+### 3.5 K-Means of KOs
+*** 
+
+
+</ br>
+
+__Use all KOs that were signficant before p-value correction__  
+
+Data Prep
+```{r}
+# Step 1: Filter KO Count table by KOs used in GSEA
+##########################################################
+KOs_Networks <- KO_SID_table %>% subset(rownames(KO_SID_table) %in% rownames(MR_coefs_GSEA))
+
+# Reorganize the table
+KOs_Networks <- t(KOs_Networks)
+
+
+# Step 2: Splir into two groups
+##########################################################
+Group1_ids <- rownames(info)[info$group=="Tertile 1"]
+
+Group2_ids <- rownames(info)[info$group=="Tertile 2/3"]
+
+#Group 1 (Tertile 1)
+KO_net_g1 <- KOs_Networks %>% subset(rownames(KOs_Networks) %in% Group1_ids)
+
+#Group 2 (Tertile 2/3)
+KO_net_g2 <- KOs_Networks %>% subset(rownames(KOs_Networks) %in% Group2_ids)
+```
+
+
+K-means
+```{r}
+# Elbow Plot for bet clusters
+#########################################################
+ fviz_nbclust(KOs_Networks, FUNcluster = kmeans, method = "silhouette")
+
+# K-means clustering
+#########################################################
+kmeans_result <- kmeans(KOs_Networks, centers = 2)
+
+# Plot K-means
+#########################################################
+KOs_Networks2 <- as.data.frame(KOs_Networks)
+KOs_Networks2$DII<- info$DII
+
+fviz_cluster(kmeans_result, data = KOs_Networks2, 
+              geom = "point", 
+              ellipse.type = "convex", 
+              ggtheme = theme_minimal(), 
+              show.clust.cent = TRUE,
+              ellipse.alpha = 0.2, 
+              pointsize = 2) +
+   labs(title = "K-Means Clustering",
+        #subtitle = "Clustered by DII",
+        x = "PC1",
+        y = "PC2") +
+   scale_color_manual(values = c("Cluster 1" = "red", "Cluster 2" = "blue")) 
+
+# Compare to tertile
+#########################################################
+#Add cluster info to dataframe
+clusters <- as.data.frame(kmeans_result[["cluster"]])
+info_clusters <- merge(info, clusters, by = 0, all=TRUE)
+
+#Plot
+ggplot(info_clusters) +
+  aes(x = `kmeans_result[["cluster"]]`, fill = group) +
+  geom_bar() +
+  xlab("Kmeans Cluster")
+
+#Chi-square
+chisq.test(table(info_clusters$`kmeans_result[["cluster"]]`, info_clusters$group))
+
+```
+
+
+
+
+
+
+
+
+
+
+
