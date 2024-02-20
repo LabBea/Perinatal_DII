@@ -1,0 +1,36 @@
+---
+title: "Perinatal DII"
+output: html_document
+date: "2024-02-20"
+---
+
+
+# R Scripts and Data for "Inflammatory dietary potential is associated with vitamin de-pletion and gut microbial dysbiosis in early pregnancy"
+***  
+This repository contains the R scripts and raw data included in the work "Inflammatory dietary potential is associated with vitamin de-pletion and gut microbial dysbiosis in early pregnancy" by Alvernaz et al 2024 pending publication. In this study, 47 pregnant persons completed an early pregnancy food frequency questionnaire (Vioscreen or DHQII) and provided a stool sample for 16s Amplicon sequencing. The information provided in this repository are as follows
+
+</br>
+
+## Data 
+***
+There are four data files included in this upload.  
+- __DHQII_Raw.xlsx__ - This contains the raw DHQII data from 24 participants  
+- __Vioscreen_RAW.xlsx__ - This contains the raw Vioscreen from 25 participants  
+- __FFQdate_ID.xlsx__ - This contains the FFQ dates as well as matching IDs for the DHQII participants  
+- __Metadata_Mapfile__ - This file has the mapfile information for the fastq files as well as all of the cleaned metadata. Note the ages have been deidentified to an age range. The raw fastq files will be uploaded to the NCBI SRA database. The SampleID column in this file matches to the file names for the raw fastq files     
+
+</br>
+
+## Scripts
+***
+There are three reference R scripts provided in this repository  
+- __Diet_DHQII/Vioscreen__ - Processing of the raw data and how the DII scores were calculated  
+- __DADA2_to_Phyloseq__ - Taking the raw fastq files through the processing and cleaning to final count tables stored a phyloseq object  
+- __Mat_Diet_Microbiome__ - Statistical analysis of the microbiome data and DII scores. All figures for the manuscript were generated in this file  
+
+</br>
+
+## Questions
+***
+Please contact Dr. Peñalver Bernabé at the University of Illinois Chicago for questions about data availability. 
+
