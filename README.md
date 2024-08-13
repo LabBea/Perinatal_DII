@@ -18,7 +18,6 @@ questionnaire (Vioscreen or DHQII) and provided a stool sample for 16s
 Amplicon sequencing. The information provided in this repository are as
 follows
 
-`</br>`{=html}
 
 ## Data
 
@@ -37,7 +36,6 @@ been deidentified to an age range. The raw fastq files will be uploaded
 to the NCBI SRA database. The SampleID column in this file matches to
 the file names for the raw fastq files
 
-`</br>`{=html}
 
 ## Scripts
 
@@ -52,7 +50,6 @@ processing and cleaning to final count tables stored a phyloseq object\
 and DII scores. All figures for the manuscript were generated in this
 file
 
-`</br>`{=html}
 
 ## Questions
 
