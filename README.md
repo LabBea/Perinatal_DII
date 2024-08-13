@@ -23,13 +23,13 @@ follows
 
 ------------------------------------------------------------------------
 
-There are four data files included in this upload.\
+There are four data files included in this upload.
 - **DHQII_Raw.xlsx** - This contains the raw DHQII data from 24
-participants\
+participants
 - **Vioscreen_RAW.xlsx** - This contains the raw Vioscreen from 25
-participants\
+participants
 - **FFQdate_ID.xlsx** - This contains the FFQ dates as well as matching
-IDs for the DHQII participants\
+IDs for the DHQII participants
 - **Metadata_Mapfile** - This file has the mapfile information for the
 fastq files as well as all of the cleaned metadata. Note the ages have
 been deidentified to an age range. The raw fastq files will be uploaded
@@ -41,11 +41,11 @@ the file names for the raw fastq files
 
 ------------------------------------------------------------------------
 
-There are three reference R scripts provided in this repository\
+There are three reference R scripts provided in this repository
 - **Diet_DHQII/Vioscreen** - Processing of the raw data and how the DII
-scores were calculated\
+scores were calculated
 - **DADA2_to_Phyloseq** - Taking the raw fastq files through the
-processing and cleaning to final count tables stored a phyloseq object\
+processing and cleaning to final count tables stored a phyloseq object
 - **Mat_Diet_Microbiome** - Statistical analysis of the microbiome data
 and DII scores. All figures for the manuscript were generated in this
 file
