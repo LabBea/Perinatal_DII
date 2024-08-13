@@ -1,8 +1,3 @@
----
-date: 2024-02-20
-output: html_document
-title: Perinatal DII
----
 
 # R Scripts and Data for "Inflammatory dietary potential is associated with vitamin de-pletion and gut microbial dysbiosis in early pregnancy"
 
